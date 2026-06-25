@@ -1,24 +1,11 @@
----
+﻿---
 name: docx-wps-fixes
-description: MANDATORY companion to the `docx` skill — MUST be loaded in parallel with `docx` in the SAME message (never sequentially). Trigger whenever ANY of these appear: the `docx` skill is invoked; a `.doc`/`.docx`/Word/WPS file is read, created, edited, or converted; Chinese text is written into a Word document via any tool (docx-js, python-docx, direct XML, pandoc, LibreOffice/soffice); a `.doc` is converted to `.docx`; WPS-authored documents are touched. Covers Chinese font rules (宋体 + Times New Roman + 纯黑), 小四号正文字号, smart-quote escaping in JS/Python source, WPS non-standard XML safety, and structural edit rules that differ from the official `docx` skill. Loading this skill late (after `docx` has already produced output) is a known failure mode — load BOTH at the first sign of any Word-document work. 中文触发场景：「改文档 / 改论文 / 改报告 / 改 Word / 改周报 / 把内容写进 docx / 中文弯引号 SyntaxError / 宋体配 Times New Roman / 小四号正文 / WPS 兼容」。
+description: Use when Codex reads, writes, edits, converts, or extracts `.doc`/`.docx`/Word/WPS documents, especially Chinese thesis/report files, WPS-authored DOCX, OOXML/XML edits, Chinese font/字号 rules, OMML formulas, formula numbering with tab stops, m:oMathPara/m:eqArr issues, English Keywords formatting, Word COM validation, python-docx/docx-js/pandoc/LibreOffice workflows. MANDATORY companion to official docx/documents skill; load in parallel at first sign of Word work.
 ---
 
 # DOCX 中文文档规则 & WPS 兼容
 
 创建或编辑中文 `.docx` 文档时的补充规则，适用于所有工具链（docx-js、Python XML 操作、python-docx 等）。这些规则是实际踩坑后总结出来的，与官方 `docx` skill 独立——官方 skill 升级不会影响这些自定义规则。
-
-## 决策速查（先查这里再往下读）
-
-| 症状 / 你正要做的事 | 跳到 |
-|---|---|
-| `pack.py` 报 `Validation failed for ...` | 「unpack / pack 工作流陷阱」——加 `--validate false`，多半其实已经成功 |
-| 改完段落 Word 里不显示、XML 看得到 | 「`body.append` 与 `<w:sectPr>`」——要插在最后 sectPr 之前 |
-| Python/JS 源码里写中文 `""` 报 SyntaxError | 「脚本中的中文引号陷阱」——一律用 `“`/`”` 或反引号包裹 |
-| 代码里 `arr[0]` `arr[1]` 被渲染成上标超链接 | 「代码片段里的方括号下标」——grep `w:anchor="ref_0"`，几乎一定是 bug |
-| `parse_xml(fragment)` 抛 XMLSyntaxError | 「parse_xml 要求 fragment 自带命名空间」——给 `<m:oMath>` 加 `xmlns:m` |
-| 用 Edit 工具改 `word/document.xml` | 「用 Edit 工具改 docx XML」——弯引号要字面字符、用 unique 子串而非整块替换 |
-| 不知道正文/标题用什么字号字体 | 「中文字体、字号、颜色」——正文 sz=24（小四），宋体+TNR+纯黑 |
-| markdown 表格被 `$\sum \|P\|$` 里的 `\|` 切碎 | 「markdown 表格行切分」——加 math 状态机识别 `$...$` |
 
 ## XML 结构安全
 
@@ -124,6 +111,16 @@ def split_table_cells(inner):
 
 - **样式 ID 必须从目标文档 `word/styles.xml` 读取，不能猜。** styleId="1" 可能是 Normal 而非 Heading 1；先解压 .docx 查 `<w:name w:val="heading 1">` 对应的实际 ID。
 - **标题编号统一手动写，不用 `<w:numPr>` 自动编号。** numPr 的格式（如 `%1.%2`）可能输出 "1.1"/"1.2" 而非预期的 "1"/"2"，与手动编号的 H2 冲突。
+- **英文关键词行按检测模板写成 `Keywords: `。** 冒号用半角 `:`，后面 1 个半角空格；关键词之间用 `, `。如果空格位于某个 `<w:t>` 末尾，必须写 `xml:space="preserve"`，否则 Word/WPS 可能吞掉尾随空格。
+
+### 公式编号与制表符排版（OMML）
+
+学校模板常要求公式居中、编号靠右，最稳的 OOXML 形态是：同一个 `<w:p>` 里依次放 `w:tab`、直接子节点 `<m:oMath>`、再放 `w:tab + <w:t>（2-1）</w:t>`。修公式编号时：
+
+- **用用户确认过的公式段作模板，但不要复制书签/批注 ID。** 可复制该段的 `<w:pPr>`、首个 tab run、尾部编号 run；保留每条公式自己的 `<m:oMath>` 和编号文本。不要把 `bookmarkStart/bookmarkEnd/commentRange*` 从模板行复制到其它公式行。
+- **把内嵌编号移出公式。** 形如 `<m:t>...#（2−2）</m:t>` 的编号会参与公式排版；删除 `#（...）`（注意 U+2212 `−`），把编号放到尾部普通 `<w:t>`。
+- **不要留下显示公式外壳。** 顶层 `<m:oMathPara>` 和单行顶层 `<m:eqArr>` 都可能让公式本体独占一行，导致右侧编号被挤到下一行。单行 `eqArr` 的安全修法是：若 `<m:oMath>` 只有一个 `<m:eqArr>`，且其中只有一个 `<m:e>`，把这个 `<m:e>` 的公式子节点提升为 `<m:oMath>` 的直接子节点，并丢弃该层的 `<m:ctrlPr>`。
+- **验证不能只看 XML。** 结构检查至少确认：目标公式段数量正确、每段有 1 个直接 `<m:oMath>`、无 `<m:oMathPara>`、无直接 `<m:oMath>/<m:eqArr>`、无 `#（...）` 残留、制表位和两个 tab run 与模板一致。若本机有 Word COM，再枚举 `Paragraph.Range.OMaths.Count > 0` 的段落，用 `Range.ComputeStatistics(1)` 确认公式编号段是 1 行；不要用普通 Find 搜索编号，因为会先命中正文里的“如式（2-2）”引用。
 
 ## 中文字体、字号、颜色
 
